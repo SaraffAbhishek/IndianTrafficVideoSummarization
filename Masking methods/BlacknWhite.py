@@ -1,0 +1,250 @@
+import streamlit as st
+import cv2
+import tempfile
+import numpy as np
+from ultralytics import YOLO
+import torch
+
+class AdvancedObjectIsolator:
+    def __init__(self, model_path='yolov8n.pt'):
+        # Use small YOLO model
+        self.model = YOLO(model_path)
+        
+        # Preset parameters
+        self.confidence_threshold = 0.5
+        self.max_objects_per_frame = 10
+
+    def detect_road_or_ground(self, frame):
+        """
+        Detect road or ground plane using color and perspective heuristics
+        """
+        # Convert to HSV color space for better color segmentation
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        
+        # Define color range for road-like surfaces
+        lower_gray = np.array([0, 0, 50])   # Lower threshold for gray/road colors
+        upper_gray = np.array([180, 30, 200])  # Upper threshold for gray/road colors
+        
+        # Create mask for potential road areas
+        road_mask = cv2.inRange(hsv, lower_gray, upper_gray)
+        
+        # Optional: Enhance road detection with morphological operations
+        kernel = np.ones((5,5), np.uint8)
+        road_mask = cv2.morphologyEx(road_mask, cv2.MORPH_CLOSE, kernel)
+        
+        return road_mask
+
+    def create_context_mask(self, frame, selected_object):
+        """
+        Create a comprehensive mask that isolates the selected object 
+        while preserving road/ground context
+        """
+        # Detect objects
+        results = self.model(frame, conf=self.confidence_threshold)
+        
+        # Create masks
+        object_mask = np.zeros(frame.shape[:2], dtype=np.uint8)
+        road_mask = self.detect_road_or_ground(frame)
+        
+        # Combine road and object masks
+        final_mask = road_mask.copy()
+        
+        for detection in results[0].boxes:
+            x1, y1, x2, y2 = detection.xyxy[0].cpu().numpy().astype(int)
+            cls = int(detection.cls[0].cpu().item())
+            label = self.model.names[cls]
+            
+            # Fill mask for selected object
+            if label == selected_object:
+                cv2.rectangle(object_mask, (x1, y1), (x2, y2), 255, -1)
+                final_mask |= object_mask
+        
+        return final_mask
+
+    def remove_other_objects(self, frame, selected_object):
+        """
+        Remove other objects while preserving road/ground context
+        """
+        # Create comprehensive mask
+        mask = self.create_context_mask(frame, selected_object)
+        
+        # Create a desaturated background
+        desaturated = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        desaturated = cv2.cvtColor(desaturated, cv2.COLOR_GRAY2BGR)
+        
+        # Combine original and desaturated images
+        result = frame.copy()
+        result[mask == 0] = desaturated[mask == 0]
+        
+        # Detect and annotate selected objects
+        results = self.model(frame, conf=self.confidence_threshold)
+        
+        for detection in results[0].boxes:
+            x1, y1, x2, y2 = detection.xyxy[0].cpu().numpy().astype(int)
+            conf = detection.conf[0].cpu().item()
+            cls = int(detection.cls[0].cpu().item())
+            label = self.model.names[cls]
+            
+            # Highlight only selected objects
+            if label == selected_object:
+                cv2.rectangle(result, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                cv2.putText(result, 
+                            f"{label}: {conf:.2f}", 
+                            (x1, y1-10), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 
+                            0.45, 
+                            (0, 255, 0), 
+                            2)
+        
+        return result
+
+    def process_frame(self, frame, selected_object):
+        # Resize frame to balance performance and quality
+        frame = cv2.resize(frame, (800, 450))
+        
+        # Process frame to remove other objects
+        processed_frame = self.remove_other_objects(frame, selected_object)
+        
+        # Detect objects for tracking
+        results = self.model(frame, conf=self.confidence_threshold)
+        
+        # Track detected objects of selected type
+        detected_objects = []
+        for detection in results[0].boxes:
+            cls = int(detection.cls[0].cpu().item())
+            label = self.model.names[cls]
+            
+            if label == selected_object:
+                conf = detection.conf[0].cpu().item()
+                x1, y1, x2, y2 = detection.xyxy[0].cpu().numpy()
+                
+                detected_objects.append({
+                    'label': label,
+                    'confidence': conf,
+                    'bbox': (x1, y1, x2, y2)
+                })
+        
+        return detected_objects, processed_frame
+
+def process_video(isolator, input_path, object_filter, progress_bar):
+    cap = cv2.VideoCapture(input_path)
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    output_frames = []
+    frame_count = 0
+
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        # Process each frame
+        detected_objects, processed_frame = isolator.process_frame(
+            frame, 
+            object_filter
+        )
+
+        # Only keep frames with detected objects
+        if detected_objects:
+            output_frames.append(processed_frame)
+
+        # Update progress
+        frame_count += 1
+        progress_bar.progress(min(frame_count / total_frames, 1.0))
+
+    cap.release()
+    return output_frames
+
+def save_video(frames, output_path, fps):
+    if not frames:
+        return False
+    
+    height, width, _ = frames[0].shape
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+    
+    for frame in frames:
+        out.write(frame)
+    
+    out.release()
+    return True
+
+def main():
+    st.title("Advanced Object Isolation in Video")
+    
+    # Initialize the isolator
+    isolator = AdvancedObjectIsolator()
+
+    # Supported objects
+    object_labels = [isolator.model.names[i] for i in range(len(isolator.model.names))]
+
+    # File uploader
+    uploaded_file = st.file_uploader(
+        "Upload a video", 
+        type=["mp4", "avi", "mov", "mkv"]
+    )
+
+    # Object selection
+    object_filter = st.selectbox(
+        "Select object to isolate", 
+        object_labels
+    )
+
+    # Process button
+    process_button = st.button("Process Video")
+
+    # Configuration sidebar
+    st.sidebar.header("Detection Settings")
+    confidence_threshold = st.sidebar.slider(
+        "Confidence Threshold", 
+        min_value=0.1, 
+        max_value=1.0, 
+        value=0.5, 
+        step=0.1
+    )
+    max_objects = st.sidebar.slider(
+        "Max Objects per Frame", 
+        min_value=1, 
+        max_value=20, 
+        value=10, 
+        step=1
+    )
+
+    if uploaded_file is not None and process_button:
+        # Update isolator settings
+        isolator.confidence_threshold = confidence_threshold
+        isolator.max_objects_per_frame = max_objects
+
+        # Temporary file handling
+        with tempfile.NamedTemporaryFile(delete=False, suffix=uploaded_file.name.split('.')[-1]) as tmp_file:
+            tmp_file.write(uploaded_file.read())
+            input_path = tmp_file.name
+
+        # Get video properties
+        cap = cv2.VideoCapture(input_path)
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        cap.release()
+
+        # Progress bar
+        progress_bar = st.progress(0)
+
+        # Process video
+        output_frames = process_video(
+            isolator, 
+            input_path, 
+            object_filter, 
+            progress_bar
+        )
+
+        # Save and display results
+        if output_frames:
+            output_path = "output.mp4"
+            if save_video(output_frames, output_path, fps):
+                st.success(f"Processed video saved as '{output_path}'")
+                st.video(output_path)
+            else:
+                st.error("Video saving failed.")
+        else:
+            st.error(f"No {object_filter} detected in the video.")
+
+if __name__ == "__main__":
+    main()

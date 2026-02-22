@@ -185,12 +185,6 @@ curl -X POST http://127.0.0.1:5000/api/process \
 
 ## 📊 Examples
 
-### Before Processing
-[Original Video](https://github.com/AishGite/-Indian-Traffic-Video-Summarization-using-YOLO-and-Multi-Level-Masking/blob/5e31d8d1e2ec2a4739633d67a3f99a23ffc0f579/uploads/6fefef0a-52b6-4366-985a-b6c090f42148.mp4)
-
-### After Processing - Black & White Technique
-[Processed Video](https://github.com/AishGite/-Indian-Traffic-Video-Summarization-using-YOLO-and-Multi-Level-Masking/blob/5e31d8d1e2ec2a4739633d67a3f99a23ffc0f579/outputs/BlacknWhite.mp4)
-
 ### Sample Output Files
 The system generates various output formats:
 - `BlacknWhite.mp4` - Black and white background technique
